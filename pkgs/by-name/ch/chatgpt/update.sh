@@ -77,6 +77,9 @@ AMD64_HASH=$(nix --extra-experimental-features nix-command hash convert \
 ARM64_HASH=$(nix --extra-experimental-features nix-command hash convert \
   --hash-algo sha256 "$(nix-prefetch-url "$ARM64_URL")")
 
+SOURCE_TMP=$(mktemp "$SOURCE_JSON.XXXXXX")
+trap 'rm -f -- "$SOURCE_TMP"' EXIT
+
 jq -n \
   --arg darwin_version "$DARWIN_VERSION" \
   --arg darwin_url "$DARWIN_URL" \
@@ -100,4 +103,12 @@ jq -n \
       "version": $amd64_version,
       "src": { "url": $amd64_url, "hash": $amd64_hash }
     }
-  }' > "$SOURCE_JSON"
+  }' > "$SOURCE_TMP"
+
+if [[ -e "$SOURCE_JSON" ]]; then
+  chmod --reference="$SOURCE_JSON" "$SOURCE_TMP"
+else
+  chmod 0644 "$SOURCE_TMP"
+fi
+mv -- "$SOURCE_TMP" "$SOURCE_JSON"
+trap - EXIT
