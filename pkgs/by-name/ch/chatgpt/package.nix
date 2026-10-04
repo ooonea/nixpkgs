@@ -174,6 +174,7 @@ stdenv.mkDerivation (finalAttrs: {
     ln -sf ${lib.getExe nodejs-slim} "$out/lib/chatgpt/resources/cua_node/bin/node"
 
     install -Dm755 ${lib.getExe finalAttrs.passthru.launcher} "$out/bin/chatgpt"
+    install -Dm644 ${./tmpfiles.conf} "$out/share/user-tmpfiles.d/chatgpt.conf"
   ''
   + lib.optionalString (isLinux && codex != null) ''
     ln -sf ${lib.getExe codex} "$out/lib/chatgpt/resources/codex"

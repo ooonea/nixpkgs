@@ -15,27 +15,27 @@ writeShellApplication {
     : "''${CHATGPT_RESOURCES_CACHE_LABEL:?}"
 
     cacheHome="''${XDG_CACHE_HOME:-''${HOME:?XDG_CACHE_HOME and HOME are unset}/.cache}"
-    cacheRoot="$cacheHome/chatgpt/bundled-plugins"
+    cacheRoot="$cacheHome/chatgpt/bundled-plugins-v2"
     resourcesSourceHash=$(printf '%s' "$CHATGPT_RESOURCES_SOURCE" | sha256sum)
     resourcesSourceHash="''${resourcesSourceHash%% *}"
     cacheKey="$CHATGPT_RESOURCES_CACHE_LABEL-$resourcesSourceHash"
     resourcesPath="$cacheRoot/$cacheKey"
 
-    mkdir -p "$cacheRoot/.locks"
-    resourcesLockPath="$cacheRoot/.locks/$cacheKey.lock"
-    exec {resourcesLockFd}> "$resourcesLockPath"
-    flock --shared "$resourcesLockFd"
+    mkdir -p "$cacheRoot"
+    exec {initLockFd}> "$cacheRoot.lock"
+    flock --exclusive "$initLockFd"
 
-    stagingLockPath="$cacheRoot/.locks/staging-v1.lock"
-    exec {stagingCleanupLockFd}> "$stagingLockPath"
-    if flock --exclusive --nonblock "$stagingCleanupLockFd"; then
-      for abandonedStagingPath in "$cacheRoot"/.chatgpt-staging-v1-*; do
-        if [[ -d "$abandonedStagingPath" ]] && ! rm -rf -- "$abandonedStagingPath"; then
-          echo "Failed to remove abandoned ChatGPT bundled-plugin staging directory: $abandonedStagingPath" >&2
-        fi
-      done
-    fi
-    exec {stagingCleanupLockFd}>&-
+    # tmpfiles may remove the directory before its lock is acquired.
+    while true; do
+      mkdir -p "$resourcesPath"
+      if exec {resourcesLockFd}< "$resourcesPath"; then
+        flock --shared "$resourcesLockFd"
+        [[ "$resourcesPath" -ef "/proc/self/fd/$resourcesLockFd" ]] && break
+        exec {resourcesLockFd}>&-
+      else
+        [[ ! -d "$resourcesPath" ]] || exit 1
+      fi
+    done
 
     requiredResourcePaths=()
     for requiredResourceName in codex codex-code-mode-host cua_node native rg; do
@@ -52,50 +52,16 @@ writeShellApplication {
     fi
 
     if [[ ! -f "$resourcesPath/.complete" ]]; then
-      exec {stagingWriterLockFd}> "$stagingLockPath"
-      flock --shared "$stagingWriterLockFd"
-      stagingPath=$(mktemp -d "$cacheRoot/.chatgpt-staging-v1-$cacheKey.XXXXXXXX")
-      trap 'rm -rf -- "$stagingPath"' EXIT
-
-      ln -s "''${requiredResourcePaths[@]}" "$stagingPath"
-      cp -R "$CHATGPT_RESOURCES_SOURCE/plugins" "$stagingPath/plugins"
-      chmod -R u+w "$stagingPath/plugins"
-      touch "$stagingPath/.complete"
-
-      # Flush the payload and commit marker before exposing the cache atomically.
-      sync --file-system "$stagingPath"
-
-      if mv -T "$stagingPath" "$resourcesPath" 2>/dev/null; then
-        sync --file-system "$cacheRoot"
-        trap - EXIT
-      elif [[ -f "$resourcesPath/.complete" ]]; then
-        rm -rf -- "$stagingPath"
-        trap - EXIT
-      else
-        echo "Failed to publish ChatGPT's writable bundled-plugin resources" >&2
-        exit 1
-      fi
-      exec {stagingWriterLockFd}>&-
+      ln -sfn -t "$resourcesPath" "''${requiredResourcePaths[@]}"
+      mkdir -p "$resourcesPath/plugins"
+      chmod -R u+w "$resourcesPath/plugins"
+      cp -RT --preserve=mode "$CHATGPT_RESOURCES_SOURCE/plugins" "$resourcesPath/plugins"
+      chmod -R u+w "$resourcesPath/plugins"
+      sync --file-system "$resourcesPath"
+      touch "$resourcesPath/.complete"
+      sync --file-system "$resourcesPath"
     fi
-
-    # Only lock-aware published caches can be removed safely.
-    for obsoletePath in "$cacheRoot"/*; do
-      if [[ "$obsoletePath" != "$resourcesPath" && -f "$obsoletePath/.complete" ]]; then
-        obsoleteKey="''${obsoletePath##*/}"
-        obsoleteLockPath="$cacheRoot/.locks/$obsoleteKey.lock"
-
-        # Caches without a lock predate this protocol and may still be in use.
-        if [[ -f "$obsoleteLockPath" ]]; then
-          exec {obsoleteLockFd}> "$obsoleteLockPath"
-          if flock --exclusive --nonblock "$obsoleteLockFd"; then
-            if ! rm -rf -- "$obsoletePath"; then
-              echo "Failed to remove obsolete ChatGPT bundled-plugin cache: $obsoletePath" >&2
-            fi
-          fi
-          exec {obsoleteLockFd}>&-
-        fi
-      fi
-    done
+    exec {initLockFd}>&-
 
     export CODEX_ELECTRON_BUNDLED_PLUGINS_RESOURCES_PATH="$resourcesPath"
 
